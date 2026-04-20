@@ -1,0 +1,391 @@
+"""
+Tower Placement für DDS GmbH – Version 2
+Neu: Radius-beschränktes Clustering
+     Jede Stadt ist garantiert maximal MAX_RADIUS_KM vom Clusterzentrum entfernt.
+"""
+ 
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import warnings
+warnings.filterwarnings("ignore")
+ 
+ 
+# ─────────────────────────────────────────────
+# EINSTELLUNGEN
+# ─────────────────────────────────────────────
+ 
+# 1 Grad Breitengrad ≈ 111 km. Wir rechnen intern in Grad,
+# aber denken in Kilometern – daher diese Umrechnung:
+KM_PER_DEGREE = 111.0
+ 
+TOWER_TYPES = {
+    "small": {
+        "radius_km": 50,                          # 50 km Reichweite
+        "radius":    50 / KM_PER_DEGREE,          # in Grad umgerechnet (~0.45°)
+        "cost":      100,
+        "color":     "steelblue",
+        "label":     "Typ S (50 km, Kosten 100)"
+    },
+    "large": {
+        "radius_km": 100,                         # 100 km Reichweite
+        "radius":    100 / KM_PER_DEGREE,         # in Grad (~0.90°)
+        "cost":      250,
+        "color":     "darkorange",
+        "label":     "Typ L (100 km, Kosten 250)"
+    }
+}
+ 
+LAMBDA = 30   # Interferenz-Gewichtung in der Zielfunktion
+ 
+ 
+# ─────────────────────────────────────────────
+# HILFSFUNKTIONEN
+# ─────────────────────────────────────────────
+ 
+def distance_km(lat1, lon1, lat2, lon2):
+    """Abstand in Kilometern (vereinfacht, gut genug für Deutschland)."""
+    # Längengrade sind in Deutschland ca. 71 km pro Grad (cos(51°) * 111)
+    lat_diff = (lat1 - lat2) * KM_PER_DEGREE
+    lon_diff = (lon1 - lon2) * KM_PER_DEGREE * np.cos(np.radians(51.0))
+    return np.sqrt(lat_diff**2 + lon_diff**2)
+ 
+def distance_deg(lat1, lon1, lat2, lon2):
+    """Abstand in Grad (für den Kreisradius auf der Karte)."""
+    return np.sqrt((lat1 - lat2)**2 + (lon1 - lon2)**2)
+ 
+def covers(tower, city_lat, city_lon):
+    """Prüft ob ein Turm eine Stadt abdeckt."""
+    d = distance_km(tower["lat"], tower["lon"], city_lat, city_lon)
+    return d <= TOWER_TYPES[tower["type"]]["radius_km"]
+ 
+def find_uncovered(cities, towers):
+    uncovered = []
+    for _, city in cities.iterrows():
+        if not any(covers(t, city["lat"], city["lon"]) for t in towers):
+            uncovered.append(city)
+    return uncovered
+ 
+ 
+# ─────────────────────────────────────────────
+# PHASE 1: Radius-beschränktes Clustering
+# ─────────────────────────────────────────────
+# Idee: Wir starten mit allen Städten als eine Gruppe.
+# Dann prüfen wir: Sind alle Städte innerhalb des erlaubten Radius
+# vom Zentrum entfernt? Falls nicht → Gruppe aufteilen.
+# Das wiederholen wir, bis jede Gruppe garantiert in den Radius passt.
+ 
+def split_cluster(cities_in_cluster):
+    """
+    Teilt eine Gruppe von Städten in zwei Hälften auf.
+    Wir finden die zwei Städte die am weitesten voneinander entfernt sind
+    und bilden zwei Gruppen um diese beiden 'Ankerpunkte'.
+    """
+    cities_list = list(cities_in_cluster.iterrows())
+    n = len(cities_list)
+ 
+    if n <= 1:
+        return [cities_in_cluster]
+ 
+    # Zwei am weitesten entfernte Städte finden (die "Ankerpunkte")
+    max_dist = 0
+    anchor_a, anchor_b = 0, 1
+ 
+    for i in range(n):
+        for j in range(i+1, n):
+            _, ci = cities_list[i]
+            _, cj = cities_list[j]
+            d = distance_km(ci["lat"], ci["lon"], cj["lat"], cj["lon"])
+            if d > max_dist:
+                max_dist = d
+                anchor_a, anchor_b = i, j
+ 
+    _, city_a = cities_list[anchor_a]
+    _, city_b = cities_list[anchor_b]
+ 
+    # Jede Stadt kommt zu dem Ankerpunkt, dem sie näher ist
+    group_a_indices = []
+    group_b_indices = []
+ 
+    for idx, city in cities_in_cluster.iterrows():
+        da = distance_km(city["lat"], city["lon"], city_a["lat"], city_a["lon"])
+        db = distance_km(city["lat"], city["lon"], city_b["lat"], city_b["lon"])
+        if da <= db:
+            group_a_indices.append(idx)
+        else:
+            group_b_indices.append(idx)
+ 
+    group_a = cities_in_cluster.loc[group_a_indices]
+    group_b = cities_in_cluster.loc[group_b_indices]
+ 
+    return [group_a, group_b]
+ 
+ 
+def phase1_radius_clustering(cities, max_radius_km):
+    """
+    Teilt Städte in Cluster auf, sodass jede Stadt garantiert
+    innerhalb von max_radius_km vom Clusterzentrum liegt.
+    """
+    print(f"\n── Phase 1: Radius-beschränktes Clustering (max {max_radius_km} km) ──")
+ 
+    # Starte mit allen Städten als eine einzige Gruppe
+    clusters = [cities.copy()]
+    final_clusters = []
+ 
+    iteration = 0
+    while clusters:
+        iteration += 1
+        current = clusters.pop(0)
+ 
+        # Zentrum des aktuellen Clusters berechnen
+        center_lat = current["lat"].mean()
+        center_lon = current["lon"].mean()
+ 
+        # Maximaler Abstand vom Zentrum zu einer Stadt im Cluster
+        max_dist = 0
+        for _, city in current.iterrows():
+            d = distance_km(center_lat, center_lon, city["lat"], city["lon"])
+            max_dist = max(max_dist, d)
+ 
+        if max_dist <= max_radius_km:
+            # Passt! Dieser Cluster ist fertig.
+            final_clusters.append(current)
+        else:
+            # Zu groß → aufteilen und beide Teile nochmal prüfen
+            parts = split_cluster(current)
+            clusters.extend(parts)
+ 
+    print(f"  → {len(final_clusters)} Cluster gefunden")
+ 
+    # Für jeden Cluster: Turmstandort und Typ bestimmen
+    towers = []
+    for cluster in final_clusters:
+        center_lat = cluster["lat"].mean()
+        center_lon = cluster["lon"].mean()
+ 
+        # Maximaler Abstand vom Zentrum
+        max_dist = max(
+            distance_km(center_lat, center_lon, row["lat"], row["lon"])
+            for _, row in cluster.iterrows()
+        )
+ 
+        # Turmtyp: Passt der kleine Turm?
+        if max_dist <= TOWER_TYPES["small"]["radius_km"]:
+            tower_type = "small"
+        else:
+            tower_type = "large"
+ 
+        towers.append({
+            "lat":   center_lat,
+            "lon":   center_lon,
+            "type":  tower_type,
+            "phase": "clustering"
+        })
+ 
+        print(f"  Cluster {len(towers):2d}: {len(cluster):2d} Städte, "
+              f"max Abstand {max_dist:.1f} km → Turm Typ '{tower_type}'")
+ 
+    return towers
+ 
+ 
+# ─────────────────────────────────────────────
+# PHASE 2: Greedy-Ergänzung (unverändert)
+# ─────────────────────────────────────────────
+ 
+def phase2_greedy(cities, towers):
+    print("\n── Phase 2: Greedy-Ergänzung ──")
+    towers = list(towers)
+ 
+    iteration = 0
+    while True:
+        uncovered = find_uncovered(cities, towers)
+        if not uncovered:
+            break
+ 
+        iteration += 1
+        best_tower = None
+        best_score = -1
+ 
+        for candidate in uncovered:
+            for tower_type, specs in TOWER_TYPES.items():
+                covered_count = sum(
+                    1 for city in uncovered
+                    if distance_km(candidate["lat"], candidate["lon"],
+                                   city["lat"], city["lon"]) <= specs["radius_km"]
+                )
+                score = covered_count / specs["cost"]
+                if score > best_score:
+                    best_score = score
+                    best_tower = {
+                        "lat":   candidate["lat"],
+                        "lon":   candidate["lon"],
+                        "type":  tower_type,
+                        "phase": "greedy"
+                    }
+ 
+        towers.append(best_tower)
+        print(f"  Iteration {iteration}: Turm '{best_tower['type']}' "
+              f"bei ({best_tower['lat']:.2f}°, {best_tower['lon']:.2f}°) "
+              f"– noch {len(uncovered)-1} Städte offen")
+ 
+    print(f"  → Alle Städte gedeckt" +
+          (f" nach {iteration} Schritten" if iteration > 0 else " (Clustering reichte aus!)"))
+    return towers
+ 
+ 
+# ─────────────────────────────────────────────
+# PHASE 3: Lokale Optimierung (unverändert)
+# ─────────────────────────────────────────────
+ 
+def count_interference(cities, towers):
+    total = 0
+    for _, city in cities.iterrows():
+        if sum(1 for t in towers if covers(t, city["lat"], city["lon"])) > 1:
+            total += 1
+    return total
+ 
+def total_cost(towers):
+    return sum(TOWER_TYPES[t["type"]]["cost"] for t in towers)
+ 
+def objective(cities, towers):
+    return total_cost(towers) + LAMBDA * count_interference(cities, towers)
+ 
+def phase3_optimization(cities, towers):
+    print("\n── Phase 3: Lokale Optimierung ──")
+    towers = list(towers)
+ 
+    improved = True
+    while improved:
+        improved = False
+        for i in range(len(towers)):
+            towers_without_i = towers[:i] + towers[i+1:]
+            if find_uncovered(cities, towers_without_i):
+                continue
+            if objective(cities, towers_without_i) < objective(cities, towers):
+                print(f"  Turm {i} ({towers[i]['type']}) entfernt "
+                      f"– Zielfunktion: {objective(cities,towers):.0f} "
+                      f"→ {objective(cities,towers_without_i):.0f}")
+                towers = towers_without_i
+                improved = True
+                break
+ 
+            if towers[i]["type"] == "large":
+                downgraded = list(towers)
+                downgraded[i] = {**towers[i], "type": "small"}
+                if not find_uncovered(cities, downgraded):
+                    if objective(cities, downgraded) < objective(cities, towers):
+                        print(f"  Turm {i} auf 'small' geändert "
+                              f"– Zielfunktion: {objective(cities,towers):.0f} "
+                              f"→ {objective(cities,downgraded):.0f}")
+                        towers = downgraded
+                        improved = True
+                        break
+ 
+    print(f"  → Optimierung abgeschlossen")
+    return towers
+ 
+ 
+# ─────────────────────────────────────────────
+# ERGEBNIS & KARTE
+# ─────────────────────────────────────────────
+ 
+def print_summary(cities, towers):
+    print("\n══════════════════════════════════")
+    print("ERGEBNIS")
+    print("══════════════════════════════════")
+    n_small    = sum(1 for t in towers if t["type"] == "small")
+    n_large    = sum(1 for t in towers if t["type"] == "large")
+    cost       = total_cost(towers)
+    interf     = count_interference(cities, towers)
+    obj        = objective(cities, towers)
+    uncovered  = find_uncovered(cities, towers)
+    print(f"  Türme gesamt : {len(towers)}")
+    print(f"  Typ S (50km) : {n_small} × {TOWER_TYPES['small']['cost']} = {n_small*TOWER_TYPES['small']['cost']}")
+    print(f"  Typ L (100km): {n_large} × {TOWER_TYPES['large']['cost']} = {n_large*TOWER_TYPES['large']['cost']}")
+    print(f"  Turmkosten   : {cost}")
+    print(f"  Interferenz  : {interf} Städte doppelt abgedeckt")
+    print(f"  Zielfunktion : {obj:.0f}")
+    print(f"  Ungedeckt    : {len(uncovered)} Städte")
+    print("══════════════════════════════════")
+ 
+ 
+def plot_map(cities, towers, filename="ergebnis_karte_v2.png"):
+    fig, ax = plt.subplots(figsize=(10, 12))
+    ax.set_facecolor("#f0f4f8")
+    fig.patch.set_facecolor("#f0f4f8")
+ 
+    for tower in towers:
+        specs = TOWER_TYPES[tower["type"]]
+        # Radius in Grad für den Kreis auf der Karte
+        r_deg = specs["radius_km"] / KM_PER_DEGREE
+        for alpha, fill in [(0.12, True), (0.5, False)]:
+            circle = mpatches.Circle(
+                (tower["lon"], tower["lat"]), radius=r_deg,
+                color=specs["color"], alpha=alpha,
+                linewidth=1.0, linestyle="--", fill=fill
+            )
+            ax.add_patch(circle)
+        marker = "^" if tower["phase"] == "clustering" else "s"
+        ax.plot(tower["lon"], tower["lat"],
+                marker=marker, color=specs["color"], markersize=10, zorder=5)
+ 
+    for _, city in cities.iterrows():
+        covered = any(covers(t, city["lat"], city["lon"]) for t in towers)
+        ax.plot(city["lon"], city["lat"],
+                "o", color="black" if covered else "red", markersize=4, zorder=6)
+        ax.text(city["lon"]+0.05, city["lat"]+0.05,
+                city["city"], fontsize=5.5, color="#333333", zorder=7)
+ 
+    legend_elements = [
+        mpatches.Patch(color="steelblue",  alpha=0.6, label=TOWER_TYPES["small"]["label"]),
+        mpatches.Patch(color="darkorange", alpha=0.6, label=TOWER_TYPES["large"]["label"]),
+        plt.Line2D([0],[0], marker="^", color="gray", markersize=8,
+                   label="Turm aus Clustering", linestyle="None"),
+        plt.Line2D([0],[0], marker="s", color="gray", markersize=8,
+                   label="Turm aus Greedy", linestyle="None"),
+        plt.Line2D([0],[0], marker="o", color="black", markersize=5,
+                   label="Stadt (gedeckt)", linestyle="None"),
+        plt.Line2D([0],[0], marker="o", color="red", markersize=5,
+                   label="Stadt (UNGEDECKT)", linestyle="None"),
+    ]
+    ax.legend(handles=legend_elements, loc="lower left", fontsize=8)
+    ax.set_xlim(5.5, 15.5)
+    ax.set_ylim(47.0, 55.5)
+    ax.set_xlabel("Längengrad", fontsize=9)
+    ax.set_ylabel("Breitengrad", fontsize=9)
+    ax.set_title(
+        "DDS GmbH – 6G Tower Placement (Version 2)\n"
+        "Radius-beschränktes Clustering + Greedy + Optimierung",
+        fontsize=11, fontweight="bold"
+    )
+    ax.grid(True, alpha=0.3, linewidth=0.5)
+    plt.tight_layout()
+    plt.savefig(filename, dpi=150, bbox_inches="tight")
+    print(f"\nKarte gespeichert: {filename}")
+    plt.close()
+ 
+ 
+# ─────────────────────────────────────────────
+# HAUPTPROGRAMM
+# ─────────────────────────────────────────────
+ 
+if __name__ == "__main__":
+ 
+    cities = pd.read_csv("cities.csv")
+    print(f"Städte geladen: {len(cities)}")
+ 
+    # Phase 1: Radius-beschränktes Clustering
+    # MAX_RADIUS_KM = maximaler Abstand einer Stadt vom Clusterzentrum
+    # Muss kleiner oder gleich dem Turmradius sein (50 km für Typ S, 100 km für Typ L)
+    MAX_RADIUS_KM = 50
+    towers = phase1_radius_clustering(cities, max_radius_km=MAX_RADIUS_KM)
+ 
+    # Phase 2: Lücken mit Greedy füllen
+    towers = phase2_greedy(cities, towers)
+ 
+    # Phase 3: Überflüssige Türme entfernen / verkleinern
+    towers = phase3_optimization(cities, towers)
+ 
+    print_summary(cities, towers)
+    plot_map(cities, towers)
