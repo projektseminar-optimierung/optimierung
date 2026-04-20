@@ -76,116 +76,55 @@ def find_uncovered(cities, towers):
 # vom Zentrum entfernt? Falls nicht → Gruppe aufteilen.
 # Das wiederholen wir, bis jede Gruppe garantiert in den Radius passt.
  
-def split_cluster(cities_in_cluster):
+def phase1_kcenter_clustering(cities, max_radius_km):
     """
-    Teilt eine Gruppe von Städten in zwei Hälften auf.
-    Wir finden die zwei Städte die am weitesten voneinander entfernt sind
-    und bilden zwei Gruppen um diese beiden 'Ankerpunkte'.
+    Farthest-First k-center clustering.
+    Minimiert Anzahl der Cluster bei maximalem Radius.
     """
-    cities_list = list(cities_in_cluster.iterrows())
-    n = len(cities_list)
- 
-    if n <= 1:
-        return [cities_in_cluster]
- 
-    # Zwei am weitesten entfernte Städte finden (die "Ankerpunkte")
-    max_dist = 0
-    anchor_a, anchor_b = 0, 1
- 
-    for i in range(n):
-        for j in range(i+1, n):
-            _, ci = cities_list[i]
-            _, cj = cities_list[j]
-            d = distance_km(ci["lat"], ci["lon"], cj["lat"], cj["lon"])
+
+    print(f"\n── Phase 1: k-center Clustering (max {max_radius_km} km) ──")
+
+    cities_list = cities.to_dict("records")
+
+    # erstes Zentrum
+    centers = [cities_list[0]]
+
+    while True:
+
+        farthest_city = None
+        max_dist = -1
+
+        for city in cities_list:
+
+            # Abstand zum nächsten Zentrum
+            d = min(
+                distance_km(city["lat"], city["lon"],
+                            c["lat"], c["lon"])
+                for c in centers
+            )
+
             if d > max_dist:
                 max_dist = d
-                anchor_a, anchor_b = i, j
- 
-    _, city_a = cities_list[anchor_a]
-    _, city_b = cities_list[anchor_b]
- 
-    # Jede Stadt kommt zu dem Ankerpunkt, dem sie näher ist
-    group_a_indices = []
-    group_b_indices = []
- 
-    for idx, city in cities_in_cluster.iterrows():
-        da = distance_km(city["lat"], city["lon"], city_a["lat"], city_a["lon"])
-        db = distance_km(city["lat"], city["lon"], city_b["lat"], city_b["lon"])
-        if da <= db:
-            group_a_indices.append(idx)
-        else:
-            group_b_indices.append(idx)
- 
-    group_a = cities_in_cluster.loc[group_a_indices]
-    group_b = cities_in_cluster.loc[group_b_indices]
- 
-    return [group_a, group_b]
- 
- 
-def phase1_radius_clustering(cities, max_radius_km):
-    """
-    Teilt Städte in Cluster auf, sodass jede Stadt garantiert
-    innerhalb von max_radius_km vom Clusterzentrum liegt.
-    """
-    print(f"\n── Phase 1: Radius-beschränktes Clustering (max {max_radius_km} km) ──")
- 
-    # Starte mit allen Städten als eine einzige Gruppe
-    clusters = [cities.copy()]
-    final_clusters = []
- 
-    iteration = 0
-    while clusters:
-        iteration += 1
-        current = clusters.pop(0)
- 
-        # Zentrum des aktuellen Clusters berechnen
-        center_lat = current["lat"].mean()
-        center_lon = current["lon"].mean()
- 
-        # Maximaler Abstand vom Zentrum zu einer Stadt im Cluster
-        max_dist = 0
-        for _, city in current.iterrows():
-            d = distance_km(center_lat, center_lon, city["lat"], city["lon"])
-            max_dist = max(max_dist, d)
- 
+                farthest_city = city
+
         if max_dist <= max_radius_km:
-            # Passt! Dieser Cluster ist fertig.
-            final_clusters.append(current)
-        else:
-            # Zu groß → aufteilen und beide Teile nochmal prüfen
-            parts = split_cluster(current)
-            clusters.extend(parts)
- 
-    print(f"  → {len(final_clusters)} Cluster gefunden")
- 
-    # Für jeden Cluster: Turmstandort und Typ bestimmen
+            break
+
+        centers.append(farthest_city)
+
+    print(f"  → {len(centers)} Clusterzentren gefunden")
+
     towers = []
-    for cluster in final_clusters:
-        center_lat = cluster["lat"].mean()
-        center_lon = cluster["lon"].mean()
- 
-        # Maximaler Abstand vom Zentrum
-        max_dist = max(
-            distance_km(center_lat, center_lon, row["lat"], row["lon"])
-            for _, row in cluster.iterrows()
-        )
- 
-        # Turmtyp: Passt der kleine Turm?
-        if max_dist <= TOWER_TYPES["small"]["radius_km"]:
-            tower_type = "small"
-        else:
-            tower_type = "large"
- 
+
+    for c in centers:
+
         towers.append({
-            "lat":   center_lat,
-            "lon":   center_lon,
-            "type":  tower_type,
+            "lat": c["lat"],
+            "lon": c["lon"],
+            "type": "small",
             "phase": "clustering"
         })
- 
-        print(f"  Cluster {len(towers):2d}: {len(cluster):2d} Städte, "
-              f"max Abstand {max_dist:.1f} km → Turm Typ '{tower_type}'")
- 
+
     return towers
  
  
